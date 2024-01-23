@@ -502,7 +502,7 @@ def _isArrayLike(obj):
 class PDFTablesDataset(torch.utils.data.Dataset):
     def __init__(self, root, transforms=None, max_size=None, do_crop=True, make_coco=False,
                  include_eval=False, max_neg=None, negatives_root=None, xml_fileset="filelist.txt",
-                image_extension='.png', class_map=None):
+                image_extension=[".jpg", ".jpeg", ".png"], class_map=None):
         self.root = root
         self.transforms = transforms
         self.do_crop=do_crop
@@ -529,7 +529,7 @@ class PDFTablesDataset(torch.utils.data.Dataset):
                 lines = file.readlines()
         except:
             lines = os.listdir(image_directory)
-        png_page_ids = set([f.strip().replace(self.image_extension, "") for f in lines if f.strip().endswith(self.image_extension)])
+        png_page_ids = set([os.path.splitext(os.path.basename(f))[0] for f in lines if f.strip().endswith(tuple(self.image_extension))])
         
         self.page_ids = sorted(xml_page_ids.intersection(png_page_ids))
         if not max_size is None:
@@ -613,7 +613,10 @@ class PDFTablesDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         # load images ad masks
         page_id = self.page_ids[idx]
-        img_path = os.path.join(self.root, "..", "images", page_id + self.image_extension)
+        for ext in self.image_extension:
+            img_path = os.path.join(self.root, "..", "images", page_id + ext)
+            if os.path.exists(img_path):
+                break
         annot_path = os.path.join(self.root, page_id + ".xml")
         
         img = Image.open(img_path).convert("RGB")

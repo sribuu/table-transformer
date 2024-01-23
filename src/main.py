@@ -19,7 +19,7 @@ import util.misc as utils
 import datasets.transforms as R
 
 import table_datasets as TD
-from table_datasets import PDFTablesDataset
+from table_datasets import PDFTablesDataset, RandomMaxResize
 from eval import eval_coco
 
 
@@ -114,7 +114,7 @@ def get_data(args):
             include_eval=False,
             max_neg=0,
             make_coco=False,
-            image_extension=".jpg",
+            image_extension=[".jpg", ".jpeg", ".png"],
             xml_fileset="train_filelist.txt",
             class_map=class_map)
         dataset_val = PDFTablesDataset(os.path.join(args.data_root_dir, "val"),
@@ -123,7 +123,7 @@ def get_data(args):
                                        max_size=args.val_max_size,
                                        include_eval=False,
                                        make_coco=True,
-                                       image_extension=".jpg",
+                                       image_extension=[".jpg", ".jpeg", ".png"],
                                        xml_fileset="val_filelist.txt",
                                        class_map=class_map)
 
@@ -156,7 +156,7 @@ def get_data(args):
                                         max_size=args.test_max_size,
                                         make_coco=True,
                                         include_eval=True,
-                                        image_extension=".jpg",
+                                        image_extension=[".jpg", ".jpeg", ".png"],
                                         xml_fileset="test_filelist.txt",
                                         class_map=class_map)
         sampler_test = torch.utils.data.SequentialSampler(dataset_test)
@@ -176,7 +176,7 @@ def get_data(args):
                                         include_original=True,
                                         max_size=args.max_test_size,
                                         make_coco=False,
-                                        image_extension=".jpg",
+                                        image_extension=[".jpg", ".jpeg", ".png"],
                                         xml_fileset="test_filelist.txt",
                                         class_map=class_map)
         return dataset_test
