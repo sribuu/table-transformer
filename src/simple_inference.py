@@ -6,10 +6,13 @@ import xml.etree.ElementTree as ET
 import os
 import random
 import io
+import time
+import warnings
+warnings.filterwarnings("ignore")
 
 import torch
 from torchvision import transforms
-from PIL import Image
+from PIL import Image, ImageDraw
 from fitz import Rect
 import numpy as np
 import pandas as pd
@@ -18,6 +21,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.patches import Patch
+import cv2
 
 from main import get_model
 import postprocess
@@ -29,6 +33,7 @@ class MaxResize(object):
         self.max_size = max_size
 
     def __call__(self, image):
+        image = image.convert("RGB")
         width, height = image.size
         current_max_size = max(width, height)
         scale = self.max_size / current_max_size
@@ -82,8 +87,8 @@ structure_class_thresholds = {
 def get_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--image_dir',
-                        help="Directory for input images")
+    parser.add_argument('--image',
+                        help="Path to image or directory of images")
     parser.add_argument('--words_dir',
                         help="Directory for input words")
     parser.add_argument('--out_dir',
@@ -673,7 +678,6 @@ def visualize_cells(img, cells, out_path):
 
 class TableExtractionPipeline(object):
     def __init__(self, det_device=None, str_device=None,
-                 det_model=None, str_model=None,
                  det_model_path=None, str_model_path=None,
                  det_config_path=None, str_config_path=None):
 
@@ -694,14 +698,14 @@ class TableExtractionPipeline(object):
             det_args = type('Args', (object,), det_config)
             det_args.device = det_device
             self.det_model, _, _ = build_model(det_args)
-            print("Detection model initialized.")
+            # print("Detection model initialized.")
 
             if not det_model_path is None:
                 self.det_model.load_state_dict(torch.load(det_model_path,
                                                      map_location=torch.device(det_device)))
                 self.det_model.to(det_device)
                 self.det_model.eval()
-                print("Detection model weights loaded.")
+                # print("Detection model weights loaded.")
             else:
                 self.det_model = None
 
@@ -711,14 +715,14 @@ class TableExtractionPipeline(object):
             str_args = type('Args', (object,), str_config)
             str_args.device = str_device
             self.str_model, _, _ = build_model(str_args)
-            print("Structure model initialized.")
+            # print("Structure model initialized.")
 
             if not str_model_path is None:
                 self.str_model.load_state_dict(torch.load(str_model_path,
                                                      map_location=torch.device(str_device)))
                 self.str_model.to(str_device)
                 self.str_model.eval()
-                print("Structure model weights loaded.")
+                # print("Structure model weights loaded.")
             else:
                 self.str_model = None
 
@@ -802,74 +806,75 @@ class TableExtractionPipeline(object):
     def extract(self, img, tokens=None, out_objects=True, out_crops=False, out_cells=False,
                 out_html=False, out_csv=False, crop_padding=10):
 
-        detect_out = self.detect(img, tokens=tokens, out_objects=False, out_crops=True,
+        detect_out = self.detect(img, tokens=tokens, out_objects=True, out_crops=True,
                                  crop_padding=crop_padding)
         cropped_tables = detect_out['crops']
+        detection_objects = detect_out['objects']
 
         extracted_tables = []
-        for table in cropped_tables:
+        for table, det_obj in zip(cropped_tables, detection_objects):
             img = table['image']
             tokens = table['tokens']
+            table_bbox = det_obj['bbox']
 
             extracted_table = self.recognize(img, tokens=tokens, out_objects=out_objects,
                                        out_cells=out_cells, out_html=out_html, out_csv=out_csv)
-            extracted_table['image'] = img
-            extracted_table['tokens'] = tokens
+            # extracted_table['image'] = img
+            # extracted_table['tokens'] = tokens
+            extracted_table['table_bbox'] = table_bbox
+            self.postprocess_extraction_output(extracted_table, crop_padding)
             extracted_tables.append(extracted_table)
-
+        
         return extracted_tables
+    
+    def postprocess_extraction_output(self, extracted_table, padding=10):
+        table_bbox = extracted_table["table_bbox"]
+        table_bbox = [int(table_bbox[0])-padding, int(table_bbox[1])-padding, int(table_bbox[2])+padding, int(table_bbox[3])+padding]
+        extracted_table["table_bbox"] = table_bbox
 
+        objects = extracted_table["objects"]
+        for obj in objects:
+            obj["bbox"][0] = int(obj["bbox"][0]) + table_bbox[0]
+            obj["bbox"][1] = int(obj["bbox"][1]) + table_bbox[1]
+            obj["bbox"][2] = int(obj["bbox"][2]) + table_bbox[0]
+            obj["bbox"][3] = int(obj["bbox"][3]) + table_bbox[1]
 
-def output_result(key, val, args, img, img_file):
-    _, ext = os.path.splitext(img_file)
-    if key == 'objects':
-        if args.verbose:
-            print(val)
-        out_file = img_file.replace(ext, "_objects.json")
-        with open(os.path.join(args.out_dir, out_file), 'w') as f:
-            json.dump(val, f)
-        if args.visualize:
-            out_file = img_file.replace(ext, "_fig_tables.jpg")
-            out_path = os.path.join(args.out_dir, out_file)
-            visualize_detected_tables(img, val, out_path)
-    elif not key == 'image' and not key == 'tokens':
-        for idx, elem in enumerate(val):
-            if key == 'crops':
-                for idx, cropped_table in enumerate(val):
-                    out_img_file = img_file.replace(ext, "_table_{}.jpg".format(idx))
-                    cropped_table['image'].save(os.path.join(args.out_dir,
-                                                                out_img_file))
-                    out_words_file = out_img_file.replace(ext, "_words.json")
-                    with open(os.path.join(args.out_dir, out_words_file), 'w') as f:
-                        json.dump(cropped_table['tokens'], f)
-            elif key == 'cells':
-                out_file = img_file.replace(ext, "_{}_objects.json".format(idx))
-                with open(os.path.join(args.out_dir, out_file), 'w') as f:
-                    json.dump(elem, f)
-                if args.verbose:
-                    print(elem)
-                if args.visualize:
-                    out_file = img_file.replace(ext, "_fig_cells.jpg")
-                    out_path = os.path.join(args.out_dir, out_file)
-                    visualize_cells(img, elem, out_path)
-            else:
-                out_file = img_file.replace(ext, "_{}.{}".format(idx, key))
-                with open(os.path.join(args.out_dir, out_file), 'w') as f:
-                    f.write(elem)
-                if args.verbose:
-                    print(elem)
-                        
+def visualize_cv2(img_path, objects):
+    img = cv2.imread(img_path)
+    for obj in objects:
+        bbox = obj["bbox"]
+        cv2.rectangle(img, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 2)
+        # cv2.putText(img, label, (bbox[0], bbox[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+    # Display image with bounding boxes and text
+    cv2.namedWindow('Image', cv2.WINDOW_NORMAL)
+    cv2.imshow('Image', img)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+def postprocess_visualize_cv2(img_path, objects, table_bbox, padding=10):
+    img = cv2.imread(img_path)
+    table_bbox = [table_bbox[0]-padding, table_bbox[1]-padding, table_bbox[2]+padding, table_bbox[3]+padding]
+    for obj in objects:
+        label = obj["label"]
+        score = obj["score"]
+        bbox = obj["bbox"]
+        bbox[0] = int(bbox[0]) + int(table_bbox[0])
+        bbox[1] = int(bbox[1]) + int(table_bbox[1])
+        bbox[2] = int(bbox[2]) + int(table_bbox[0])
+        bbox[3] = int(bbox[3]) + int(table_bbox[1])
+        cv2.rectangle(img, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 2)
+        # cv2.putText(img, label, (bbox[0], bbox[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+    # Display image with bounding boxes and text
+    cv2.namedWindow('Image', cv2.WINDOW_NORMAL)
+    cv2.imshow('Image', img)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 def main():
     args = get_args()
-    print(args.__dict__)
-    print('-' * 100)
-
-    if not args.out_dir is None and not os.path.exists(args.out_dir):
-        os.makedirs(args.out_dir)
 
     # Create inference pipeline
-    print("Creating inference pipeline")
+    # print("Creating inference pipeline")
     pipe = TableExtractionPipeline(det_device=args.detection_device,
                                    str_device=args.structure_device,
                                    det_config_path=args.detection_config_path, 
@@ -878,64 +883,53 @@ def main():
                                    str_model_path=args.structure_model_path)
 
     # Load images
-    img_files = os.listdir(args.image_dir)
-    num_files = len(img_files)
-    random.shuffle(img_files)
+    if os.path.isfile(args.image):
+        img_paths = [args.image]
+    elif os.path.isdir(args.image):
+        img_paths = [os.path.join(args.image, img_file) for img_file in os.listdir(args.image)]
+    else:
+        raise FileNotFoundError(f"File or directory '{args.image}' doesn't exist")
 
-    for count, img_file in enumerate(img_files):
-        print("({}/{})".format(count+1, num_files))
-        img_path = os.path.join(args.image_dir, img_file)
+    valid_ext = (".png", ".jpg", ".jpeg")
+    for count, img_path in enumerate(img_paths):
+        if os.path.splitext(img_path)[1] not in valid_ext:
+            raise Exception(f"Invalid file extensions. Only support {valid_ext}")
         img = Image.open(img_path)
-        print("Image loaded.")
+        # print("Image loaded.")
 
-        _, ext = os.path.splitext(img_file)
-        if not args.words_dir is None:
-            tokens_path = os.path.join(args.words_dir, img_file.replace(ext, "_words.json"))
-            with open(tokens_path, 'r') as f:
-                tokens = json.load(f)
-
-                # Handle dictionary format
-                if type(tokens) is dict and 'words' in tokens:
-                    tokens = tokens['words']
-
-                # 'tokens' is a list of tokens
-                # Need to be in a relative reading order
-                # If no order is provided, use current order
-                for idx, token in enumerate(tokens):
-                    if not 'span_num' in token:
-                        token['span_num'] = idx
-                    if not 'line_num' in token:
-                        token['line_num'] = 0
-                    if not 'block_num' in token:
-                        token['block_num'] = 0
-        else:
-            tokens = []
+        tokens = []
 
         if args.mode == 'recognize':
-            extracted_table = pipe.recognize(img, tokens, out_objects=args.objects, out_cells=args.csv,
-                                out_html=args.html, out_csv=args.csv)
-            print("Table(s) recognized.")
-
-            for key, val in extracted_table.items():
-                output_result(key, val, args, img, img_file)
+            start = time.time()
+            extracted_table = pipe.recognize(img, tokens, out_objects=True, out_cells=args.csv,
+                                out_html=False, out_csv=args.csv)
+            elapsed = time.time() - start
+            print(f"Table(s) recognized in {elapsed} s.")
+            print(f"extracted_table: {extracted_table}")
 
         if args.mode == 'detect':
-            detected_tables = pipe.detect(img, tokens, out_objects=args.objects, out_crops=args.crops)
-            print("Table(s) detected.")
-
-            for key, val in detected_tables.items():
-                output_result(key, val, args, img, img_file)
+            start = time.time()
+            detected_tables = pipe.detect(img, tokens, out_objects=True, out_crops=args.crops)
+            elapsed = time.time() - start
+            print(f"Table(s) detected in {elapsed} s.")
+            print(f"detected_tables: {detected_tables}")
 
         if args.mode == 'extract':
-            extracted_tables = pipe.extract(img, tokens, out_objects=args.objects, out_cells=args.csv,
-                                            out_html=args.html, out_csv=args.csv,
+            start = time.time()
+            extracted_tables = pipe.extract(img, tokens, out_objects=True, out_cells=args.csv,
+                                            out_html=False, out_csv=args.csv,
                                             crop_padding=args.crop_padding)
-            print("Table(s) extracted.")
+            elapsed = time.time() - start
+            # print(f"Table(s) extracted in {elapsed} s.")
 
-            for table_idx, extracted_table in enumerate(extracted_tables):
-                for key, val in extracted_table.items():
-                    output_result(key, val, args, extracted_table['image'],
-                                  img_file.replace('.jpg', '_{}.jpg'.format(table_idx)))
+            # # visualize the result
+            # visualize_cv2(img_path, extracted_tables[0]["objects"])
+
+            # Dump result
+            result = {
+                "result": extracted_tables
+            }
+            print(result)
 
 if __name__ == "__main__":
     main()
