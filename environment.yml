@@ -22,3 +22,5 @@ dependencies:
     - scikit-image==0.20.0
     - scipy==1.10.1
     - PyMuPDF==1.21.1
+    - gdown==5.0.0
+    - opencv-python-headless==4.9.0.80
